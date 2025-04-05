@@ -5,7 +5,7 @@ export const config = {
 }
 
 //const OPENAI_API_KEY = process.env.OPENAI_API_KEY!; 
-const OPENAI_API_KEY = "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";
+const OPENAI_API_KEY = "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";
 
 export default async function handler(req: NextRequest) {
   if (req.method === 'OPTIONS') {
