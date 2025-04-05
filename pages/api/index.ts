@@ -4,7 +4,7 @@ export const config = {
   runtime: 'edge',
 }
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!; 
 
 export default async function handler(req: NextRequest) {
   if (req.method === 'OPTIONS') {
