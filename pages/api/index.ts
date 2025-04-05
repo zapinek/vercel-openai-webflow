@@ -4,7 +4,8 @@ export const config = {
   runtime: 'edge',
 }
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!; 
+//const OPENAI_API_KEY = process.env.OPENAI_API_KEY!; 
+const OPENAI_API_KEY = "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";
 
 export default async function handler(req: NextRequest) {
   if (req.method === 'OPTIONS') {
