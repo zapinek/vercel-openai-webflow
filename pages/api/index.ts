@@ -1,10 +1,13 @@
+// /api/index.ts (Next.js route handler)
+// Vercel Edge + SSE proxy na OpenAI Chat Completions (stream)
 import type { NextRequest } from 'next/server'
 
-export const config = { runtime: 'edge' } as const
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!
+export const runtime = 'edge';            // Edge runtime
+export const maxDuration = 60;            // prodluž timeout na 60s (Pro / Enterprise)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!; 
 
 export default async function handler(req: NextRequest) {
+  // --- CORS preflight ---
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -26,10 +29,21 @@ export default async function handler(req: NextRequest) {
     })
   }
 
+  if (!OPENAI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'Missing OPENAI_API_KEY' }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
+    })
+  }
+
+  // --- Načti payload a vynucuj stream: true ---
   let payload: any
   try {
     payload = await req.json()
-  } catch (e) {
+  } catch {
     return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
       status: 400,
       headers: {
@@ -38,12 +52,10 @@ export default async function handler(req: NextRequest) {
       },
     })
   }
-
   payload.stream = true
-  // (volitelně můžeš přidat default model)
   if (!payload.model) payload.model = 'gpt-4o'
 
-  // Volání OpenAI se streamem (SSE)
+  // --- Zavoláme OpenAI ---
   const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -53,9 +65,10 @@ export default async function handler(req: NextRequest) {
     body: JSON.stringify(payload),
   })
 
+  // Když OpenAI vrátí chybu, vrať ji hned (ne stream)
   if (!openaiRes.ok || !openaiRes.body) {
-    const text = await openaiRes.text().catch(() => '')
-    return new Response(text || JSON.stringify({ error: 'OpenAI request failed' }), {
+    const msg = await openaiRes.text().catch(() => '')
+    return new Response(msg || JSON.stringify({ error: 'OpenAI request failed' }), {
       status: openaiRes.status || 500,
       headers: {
         'Content-Type': 'application/json',
@@ -64,34 +77,35 @@ export default async function handler(req: NextRequest) {
     })
   }
 
+  // --- Přeposlat SSE stream 1:1 + heartbeaty ---
   const encoder = new TextEncoder()
   const reader = openaiRes.body.getReader()
 
   const stream = new ReadableStream({
     start(controller) {
+      // Heartbeat každých 15s (SSE comment) – drží spojení „živé“
       const hb = setInterval(() => {
-        controller.enqueue(encoder.encode(`: ping\n\n`)) // SSE comment (neviditelné pro klienta)
+        controller.enqueue(encoder.encode(`: ping\n\n`))
       }, 15000)
 
-      const pump = async () => {
+      ;(async () => {
         try {
           while (true) {
-            const { value, done } = await reader.read()
+            const { done, value } = await reader.read()
             if (done) break
-            controller.enqueue(value)
+            controller.enqueue(value) // OpenAI už posílá "data: {...}\n\n"
           }
-        } catch (err) {
+        } catch (e) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: 'Stream error' })}\n\n`))
         } finally {
           clearInterval(hb)
           controller.close()
         }
-      }
-
-      pump()
+      })()
     },
   })
 
+  // HNED vrátíme response se správnými SSE hlavičkami
   return new Response(stream, {
     status: 200,
     headers: {
