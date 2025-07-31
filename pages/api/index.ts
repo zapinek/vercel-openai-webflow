@@ -1,12 +1,12 @@
+// /api/index.ts (Route Handler v Next.js, runtime: edge)
 import type { NextRequest } from 'next/server'
 
-export const config = {
-  runtime: 'edge',
-}
+export const config = { runtime: 'edge' } as const
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY!
 
 export default async function handler(req: NextRequest) {
+  // CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -15,55 +15,99 @@ export default async function handler(req: NextRequest) {
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
       },
-    });
+    })
   }
 
+  if (req.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Only POST is allowed' }), {
+      status: 405,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
+    })
+  }
+
+  let payload: any
+  try {
+    payload = await req.json()
+  } catch (e) {
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
+    })
+  }
+
+  // Vynutíme streamování (i kdyby frontend zapomněl)
+  payload.stream = true
+  // (volitelně můžeš přidat default model)
+  if (!payload.model) payload.model = 'gpt-4o'
+
+  // Volání OpenAI se streamem (SSE)
   const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${OPENAI_API_KEY}`,
     },
-    body: req.body,
-  });
+    body: JSON.stringify(payload),
+  })
 
+  // Pokud OpenAI vrátí chybu, vrať ji jako JSON (ne stream)
   if (!openaiRes.ok || !openaiRes.body) {
-    return new Response(await openaiRes.text(), {
-      status: openaiRes.status,
+    const text = await openaiRes.text().catch(() => '')
+    return new Response(text || JSON.stringify({ error: 'OpenAI request failed' }), {
+      status: openaiRes.status || 500,
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
       },
-    });
+    })
   }
 
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
-  const reader = openaiRes.body.getReader();
-  const decoder = new TextDecoder();
+  // Přepošleme stream 1:1, plus heartbeaty
+  const encoder = new TextEncoder()
+  const reader = openaiRes.body.getReader()
 
-  (async () => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+  const stream = new ReadableStream({
+    start(controller) {
+      // heartbeat každých 15 s – zabraňuje bufferování/proxy timeoutům
+      const hb = setInterval(() => {
+        controller.enqueue(encoder.encode(`: ping\n\n`)) // SSE comment (neviditelné pro klienta)
+      }, 15000)
 
-        const chunk = decoder.decode(value);
-        await writer.write(chunk);
+      const pump = async () => {
+        try {
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            // OpenAI už posílá SSE ("data: {...}\n\n"), pouze přepošleme dál
+            controller.enqueue(value)
+          }
+        } catch (err) {
+          // pošli klientovi chybovou událost jako SSE
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: 'Stream error' })}\n\n`))
+        } finally {
+          clearInterval(hb)
+          controller.close()
+        }
       }
-    } catch (err) {
-      console.error("Stream error:", err);
-    } finally {
-      await writer.close();
-    }
-  })();
 
-  return new Response(readable, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      pump()
     },
-  });
+  })
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      // Klíčové hlavičky pro SSE + CORS + zákaz transformací
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Access-Control-Allow-Origin': '*',
+      // V Edge runtime se některé hlavičky (Connection, Transfer-Encoding) ignorují – neřeš
+    },
+  })
 }
