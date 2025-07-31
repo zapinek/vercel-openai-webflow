@@ -1,4 +1,3 @@
-// /api/index.ts (Route Handler v Next.js, runtime: edge)
 import type { NextRequest } from 'next/server'
 
 export const config = { runtime: 'edge' } as const
@@ -6,7 +5,6 @@ export const config = { runtime: 'edge' } as const
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!
 
 export default async function handler(req: NextRequest) {
-  // CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -41,7 +39,6 @@ export default async function handler(req: NextRequest) {
     })
   }
 
-  // Vynutíme streamování (i kdyby frontend zapomněl)
   payload.stream = true
   // (volitelně můžeš přidat default model)
   if (!payload.model) payload.model = 'gpt-4o'
@@ -56,7 +53,6 @@ export default async function handler(req: NextRequest) {
     body: JSON.stringify(payload),
   })
 
-  // Pokud OpenAI vrátí chybu, vrať ji jako JSON (ne stream)
   if (!openaiRes.ok || !openaiRes.body) {
     const text = await openaiRes.text().catch(() => '')
     return new Response(text || JSON.stringify({ error: 'OpenAI request failed' }), {
@@ -68,13 +64,11 @@ export default async function handler(req: NextRequest) {
     })
   }
 
-  // Přepošleme stream 1:1, plus heartbeaty
   const encoder = new TextEncoder()
   const reader = openaiRes.body.getReader()
 
   const stream = new ReadableStream({
     start(controller) {
-      // heartbeat každých 15 s – zabraňuje bufferování/proxy timeoutům
       const hb = setInterval(() => {
         controller.enqueue(encoder.encode(`: ping\n\n`)) // SSE comment (neviditelné pro klienta)
       }, 15000)
@@ -84,11 +78,9 @@ export default async function handler(req: NextRequest) {
           while (true) {
             const { value, done } = await reader.read()
             if (done) break
-            // OpenAI už posílá SSE ("data: {...}\n\n"), pouze přepošleme dál
             controller.enqueue(value)
           }
         } catch (err) {
-          // pošli klientovi chybovou událost jako SSE
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: 'Stream error' })}\n\n`))
         } finally {
           clearInterval(hb)
@@ -103,11 +95,9 @@ export default async function handler(req: NextRequest) {
   return new Response(stream, {
     status: 200,
     headers: {
-      // Klíčové hlavičky pro SSE + CORS + zákaz transformací
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       'Access-Control-Allow-Origin': '*',
-      // V Edge runtime se některé hlavičky (Connection, Transfer-Encoding) ignorují – neřeš
     },
   })
 }
